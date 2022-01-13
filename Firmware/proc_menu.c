@@ -1913,7 +1913,7 @@ void handle_left_arrow(void) {
 #ifdef BP_ENABLE_SUMP_SUPPORT
   if (menu_state.binary_mode_counter >= 5) {
     enter_sump_mode();
-    menu_state.binary_mode_counter = 0;
+    menu_state.binary_mode_counter = 1;
     return;
   }
 #endif /* BP_ENABLE_SUMP_SUPPORT */
