@@ -351,48 +351,9 @@ typedef enum {
 } sump_sampler_state_t;
 
 /**
- * Incoming command processing states.
- */
-typedef enum {
-  /** Waiting for a command to arrive on the serial port. */
-	RX_COMMAND_IDLE = 0,
-
-  /** A long command was received, and parameters need to be acquired. */
-	RX_COMMAND_PARAMETERS,
-} sump_analyzer_command_state_t;
-
-/**
- * SUMP command buffer size.
- *
- * A SUMP command can be up to 5 bytes long (SUMP_DIV, SUMP_CNT, SUMP_FLAGS,
- * SUMP_TRIG, SUMP_TRIG_VALS).
- */
-#define SUMP_COMMAND_BUFFER_LENGTH 5
-
-/**
- * SUMP command storage structure.
- */
-typedef struct {
-  /** Command bytes storage buffer. */
-	uint8_t bytes[SUMP_COMMAND_BUFFER_LENGTH];
-
-  /** How many parameter bytes still need to be obtained. */
-	uint8_t left;
-
-  /** How many parameter bytes have been obtained so far. */
-	uint8_t count;
-} __attribute__ ((packed)) sump_command_t;
-
-/**
  * The current state of the sampler.
  */
 static sump_sampler_state_t sampler_state = SAMPLER_IDLE;
-
-/**
- * The current state of the command processor.
- */
-static sump_analyzer_command_state_t command_processor_state =
-    RX_COMMAND_IDLE;
 
 /**
  * How many bytes should be acquired in the next sampling operation, in bytes.
@@ -432,6 +393,14 @@ static void sump_reset(void)
 	sampler_state = SAMPLER_IDLE;
 }
 
+static void sump_read_cmd_param(uint8_t *param)
+{
+	size_t i;
+
+	for (i = 0; i < 4; i++)
+		*param++ = user_serial_read_byte();
+}
+
 /**
  * Processes the given byte as a part of a SUMP command.
  *
@@ -440,174 +409,134 @@ static void sump_reset(void)
  */
 static bool sump_handle_command_byte(unsigned char input_byte)
 {
+	uint8_t param[4];
 	uint32_t period;
-	/*
-	 * The command storage buffer.
-	 *
-	 * No need to clear it first, as it will be properly initialized upon
-	 * receiving a long (5 bytes) command.
-	 */
-	static sump_command_t command_buffer = {.bytes = {0},
-						.count = 0, .left = 0 };
 
-	switch (command_processor_state) {
-	case RX_COMMAND_IDLE:
-		/* No command bytes received yet, this is the first one. */
-		switch (input_byte) {
-		case SUMP_RESET:
-			/* Reset the analyzer. */
-			sump_reset();
-			return true;
+	/* No command bytes received yet, this is the first one. */
+	switch (input_byte) {
+	case SUMP_RESET:
+		/* Reset the analyzer. */
+		sump_reset();
+		return true;
 
-		case SUMP_ID:
-			/* Send the device identification buffer. */
-			bp_write_buffer(SUMP_DEVICE_ID,
-					sizeof(SUMP_DEVICE_ID));
-			break;
+	case SUMP_ID:
+		/* Send the device identification buffer. */
+		bp_write_buffer(SUMP_DEVICE_ID, sizeof(SUMP_DEVICE_ID));
+		break;
 
-		case SUMP_RUN:
-			/* Arm the sampler. */
+	case SUMP_RUN:
+		/* Arm the sampler. */
 
-			/* Turn the LED on. */
-			BP_LEDMODE = ON;
+		/* Turn the LED on. */
+		BP_LEDMODE = ON;
 
-			/* Stop timer #4. */
-			T4CON = 0;
+		/* Stop timer #4. */
+		T4CON = 0;
 
-			/* Clear timer #5 holding register. */
-			TMR5HLD = 0;
+		/* Clear timer #5 holding register. */
+		TMR5HLD = 0;
 
-			/* Setup timer #4 counter. */
-			TMR4 = 0;
+		/* Setup timer #4 counter. */
+		TMR4 = 0;
 
-			/* Timer #4 counter will be 32 bits wide. */
-			T4CONbits.T32 = ON;
+		/* Timer #4 counter will be 32 bits wide. */
+		T4CONbits.T32 = ON;
 
-			/* Clear change notification interrupt flag. */
-			IFS1bits.CNIF = OFF;
+		/* Clear change notification interrupt flag. */
+		IFS1bits.CNIF = OFF;
 
-			/* Disable change notification interrupts. */
-			IEC1bits.CNIE = OFF;
+		/* Disable change notification interrupts. */
+		IEC1bits.CNIE = OFF;
 
-			/* Set change notification interrupt priority to 1. */
-			IPC4bits.CNIP = 1;
+		/* Set change notification interrupt priority to 1. */
+		IPC4bits.CNIP = 1;
 
-			/* Update sampler state. */
-			sampler_state = SAMPLER_ARMED;
-			break;
+		/* Update sampler state. */
+		sampler_state = SAMPLER_ARMED;
+		break;
 
-		case SUMP_DESC:
-			/* Send device description. */
-			bp_write_buffer(SUMP_METADATA,
-					sizeof(SUMP_METADATA));
-			break;
+	case SUMP_DESC:
+		/* Send device description. */
+		bp_write_buffer(SUMP_METADATA, sizeof(SUMP_METADATA));
+		break;
 
-		case SUMP_XON:
-		case SUMP_XOFF:
-			/* Start/Stop and resume are not supported yet. */
-			break;
+	case SUMP_XON:
+	case SUMP_XOFF:
+		/* Start/Stop and resume are not supported yet. */
+		break;
 
-		default:
-			/* It must be a long command then. */
+	case SUMP_TRIG:
+		sump_read_cmd_param(param);
 
-			/* Store the first byte. */
-			command_buffer.bytes[0] = input_byte;
+		/* Set a trigger on the AUX pin. */
+		if (param[0] & 0b00010000) {
+			CNEN2 |= 0b0000000000000001;
+		}
 
-			/* Update counters. */
-			command_buffer.left = 4;
-			command_buffer.count = 0;
+		/* Set a trigger on the ??? pin. */
+		if (param[0] & 0b00001000) {
+			CNEN2 |= 0b0000000000100000;
+		}
 
-			/* Update state. */
-			command_processor_state = RX_COMMAND_PARAMETERS;
-			break;
+		/* Set a trigger on the ??? pin. */
+		if (param[0] & 0b00000100) {
+			CNEN2 |= 0b0000000001000000;
+		}
+
+		/* Set a trigger on the ??? pin. */
+		if (param[0] & 0b00000010) {
+			CNEN2 |= 0b0000000010000000;
+		}
+
+		/* Set a trigger on the ??? pin. */
+		if (param[0] & 0b00000001) {
+			CNEN2 |= 0b0000000100000000;
 		}
 		break;
 
-	case RX_COMMAND_PARAMETERS:
-		/* Keep reading parameter data. */
+	case SUMP_FLAGS:
+		sump_read_cmd_param(param);
 
-		/* Update command count. */
-		command_buffer.count++;
+		/* @TODO: Fill this? */
+		break;
 
-		/* Fill buffer. */
-		command_buffer.bytes[command_buffer.count] = input_byte;
+	case SUMP_CNT:
+		sump_read_cmd_param(param);
 
-		/* Check whether the buffer is full or not. */
-		if (command_buffer.count < command_buffer.left) {
-			break;
+		/* Read requested samples buffer size. */
+		samples_to_acquire = (((param[1] << 8) + param[0]) + 1) * 4;
+
+		/* Clamp sample counter if more bytes are requested. */
+		if (samples_to_acquire > BP_SUMP_SAMPLE_MEMORY_SIZE) {
+			samples_to_acquire = BP_SUMP_SAMPLE_MEMORY_SIZE;
+		}
+		break;
+
+	case SUMP_DIV:
+		sump_read_cmd_param(param);
+
+		/*
+		 * Read the 24-bits period value and rescale from SUMP's
+		 * own 100MHz frequency range to the internal 16MIPs
+		 * range.
+		 */
+		period = ((((uint32_t)param[2] << 16) +
+			    ((uint32_t)param[1] << 8) +
+			    ((uint32_t)param[0]) + 1) * 4) / 25;
+
+		/* Round down if needed. */
+		if (period > 0x10) {
+			period -= 0x10;
+		} else {
+			period = 1;
 		}
 
-		/* Process the fully read command buffer. */
-		switch (command_buffer.bytes[0]) {
-		case SUMP_TRIG:
-			/* Set a trigger on the AUX pin. */
-			if (command_buffer.bytes[1] & 0b00010000) {
-				CNEN2 |= 0b0000000000000001;
-			}
-
-			/* Set a trigger on the ??? pin. */
-			if (command_buffer.bytes[1] & 0b00001000) {
-				CNEN2 |= 0b0000000000100000;
-			}
-
-			/* Set a trigger on the ??? pin. */
-			if (command_buffer.bytes[1] & 0b00000100) {
-				CNEN2 |= 0b0000000001000000;
-			}
-
-			/* Set a trigger on the ??? pin. */
-			if (command_buffer.bytes[1] & 0b00000010) {
-				CNEN2 |= 0b0000000010000000;
-			}
-
-			/* Set a trigger on the ??? pin. */
-			if (command_buffer.bytes[1] & 0b00000001) {
-				CNEN2 |= 0b0000000100000000;
-			}
-			break;
-
-		case SUMP_FLAGS:
-			/* @TODO: Fill this? */
-			break;
-
-		case SUMP_CNT:
-			/* Read requested samples buffer size. */
-			samples_to_acquire =
-			    (((command_buffer.bytes[2] << 8) +
-			      command_buffer.bytes[1]) + 1) * 4;
-
-			/* Clamp sample counter if more bytes are requested. */
-			if (samples_to_acquire >
-			    BP_SUMP_SAMPLE_MEMORY_SIZE) {
-				samples_to_acquire =
-				    BP_SUMP_SAMPLE_MEMORY_SIZE;
-			}
-			break;
-
-		case SUMP_DIV:
-			/*
-			 * Read the 24-bits period value and rescale from SUMP's
-			 * own 100MHz frequency range to the internal 16MIPs
-			 * range.
-			 */
-			period = (((((uint32_t) command_buffer.bytes[3] << 16) +
-				    ((uint32_t) command_buffer.bytes[2] << 8) +
-				    (uint32_t) command_buffer.bytes[1]) + 1) * 4) / 25;
-
-			/* Round down if needed. */
-			if (period > 0x10) {
-				period -= 0x10;
-			} else {
-				period = 1;
-			}
-
-			/* Set timer period. */
-			PR5 = HI16(period);
-			PR4 = LO16(period);
-
-			break;
-		}
-		command_processor_state = RX_COMMAND_IDLE;
+		/* Set timer period. */
+		PR5 = HI16(period);
+		PR4 = LO16(period);
+		break;
+	default:
+		/* unknown command, ignore */
 		break;
 	}
 	return false;
