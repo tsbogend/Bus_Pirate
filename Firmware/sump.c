@@ -358,9 +358,6 @@ typedef enum {
 
   /** A long command was received, and parameters need to be acquired. */
   RX_COMMAND_PARAMETERS,
-
-  /** A fully formed command was received and is being processed. */
-  RX_COMMAND_PROCESS
 } sump_analyzer_command_state_t;
 
 /**
@@ -502,7 +499,7 @@ bool sump_handle_command_byte(unsigned char input_byte) {
    * No need to clear it first, as it will be properly initialized upon
    * receiving a long (5 bytes) command.
    */
-  sump_command_t command_buffer = {.bytes = {0}, .count = 0, .left = 0};
+  static sump_command_t command_buffer = {.bytes = {0}, .count = 0, .left = 0};
 
   switch (command_processor_state) {
 
@@ -591,10 +588,7 @@ bool sump_handle_command_byte(unsigned char input_byte) {
       break;
     }
 
-  /* Intentional fall-through. */
-
-  /* Process the fully read command buffer. */
-  case RX_COMMAND_PROCESS:
+    /* Process the fully read command buffer. */
     switch (command_buffer.bytes[0]) {
     /* Set triggers. */
     case SUMP_TRIG:
