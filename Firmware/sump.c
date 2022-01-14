@@ -340,22 +340,6 @@ static const uint8_t SUMP_DEVICE_ID[] = { '1', 'A', 'L', 'S' };
 extern bus_pirate_configuration_t bus_pirate_configuration;
 
 /**
- * Sampler states.
- */
-typedef enum {
-  /** Sampler is not armed, no acquisition is in progress. */
-	SAMPLER_IDLE = 0,
-
-  /** Sampler is either ready for acquisition or is currently acquiring. */
-	SAMPLER_ARMED
-} sump_sampler_state_t;
-
-/**
- * The current state of the sampler.
- */
-static sump_sampler_state_t sampler_state = SAMPLER_IDLE;
-
-/**
  * How many bytes should be acquired in the next sampling operation, in bytes.
  */
 static unsigned int samples_to_acquire;
@@ -388,9 +372,95 @@ static void sump_reset(void)
 
 	/* Default to acquire a full buffer. */
 	samples_to_acquire = BP_SUMP_SAMPLE_MEMORY_SIZE;
+}
 
-	/* Initialize the sampler. */
-	sampler_state = SAMPLER_IDLE;
+/**
+ * Acquires data from the probes and sends it out to the controlling software.
+ *
+ * This function will acquire up to BP_SUMP_SAMPLE_MEMORY_SIZE, by using the
+ * value read from the samples_to_acquire variable.  Calling this function
+ * where the sampler is not armed will not trigger any action.
+ *
+ * To avoid rewriting interrupt vectors with the bootloader, this firmware
+ * currently uses polling to read the trigger and timer.  A final version
+ * should use interrupts after lots of testing.
+ *
+ * @return true if data acquisition was performed, false otherwise.
+ */
+static bool sump_acquire_samples(void)
+{
+	size_t i;
+
+	/* Turn the LED on. */
+	BP_LEDMODE = ON;
+
+	/* Stop timer #4. */
+	T4CON = 0;
+
+	/* Clear timer #5 holding register. */
+	TMR5HLD = 0;
+
+	/* Setup timer #4 counter. */
+	TMR4 = 0;
+
+	/* Timer #4 counter will be 32 bits wide. */
+	T4CONbits.T32 = ON;
+
+	/* Clear change notification interrupt flag. */
+	IFS1bits.CNIF = OFF;
+
+	/* Disable change notification interrupts. */
+	IEC1bits.CNIE = OFF;
+
+	/* Set change notification interrupt priority to 1. */
+	IPC4bits.CNIP = 1;
+
+	/* wait for trigger */
+	while (!IFS1bits.CNIF && CNEN2) {
+		/* check for abort CMDs */
+		if (user_serial_ready_to_read()) {
+			switch (user_serial_read_byte())
+			case SUMP_RESET:
+				return true;
+		}
+	}
+
+	/* Take samples. */
+
+	/* Start timer #4. */
+	T4CONbits.TON = ON;
+
+	/* Clear timer #4 interrupt flag. */
+	IFS1bits.T5IF = OFF;
+
+	/* Capture samples into the terminal buffer. */
+	for (i = 0; i < samples_to_acquire; i++) {
+		bus_pirate_configuration.terminal_input[i] = PORTB >> 6;
+
+		/* Wait for timer4 interrupt to trigger. */
+		while (IFS1bits.T5IF == OFF) {
+		}
+
+		/* Clear timer #4 interrupt flag. */
+		IFS1bits.T5IF = OFF;
+	}
+
+	/* Disable change notification for pins 16 to 31. */
+	CNEN2 = 0;
+
+	/* Stop timer #4. */
+	T4CON = OFF;
+
+	/* Write captured samples out. */
+	for (i = samples_to_acquire; i > 0; i--) {
+		user_serial_transmit_character (bus_pirate_configuration.terminal_input[i - 1]);
+	}
+
+	/* Reset the analyzer state. */
+	sump_reset();
+
+	/* Acquisition complete. */
+	return true;
 }
 
 static void sump_read_cmd_param(uint8_t *param)
@@ -425,35 +495,7 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 		break;
 
 	case SUMP_RUN:
-		/* Arm the sampler. */
-
-		/* Turn the LED on. */
-		BP_LEDMODE = ON;
-
-		/* Stop timer #4. */
-		T4CON = 0;
-
-		/* Clear timer #5 holding register. */
-		TMR5HLD = 0;
-
-		/* Setup timer #4 counter. */
-		TMR4 = 0;
-
-		/* Timer #4 counter will be 32 bits wide. */
-		T4CONbits.T32 = ON;
-
-		/* Clear change notification interrupt flag. */
-		IFS1bits.CNIF = OFF;
-
-		/* Disable change notification interrupts. */
-		IEC1bits.CNIE = OFF;
-
-		/* Set change notification interrupt priority to 1. */
-		IPC4bits.CNIP = 1;
-
-		/* Update sampler state. */
-		sampler_state = SAMPLER_ARMED;
-		break;
+		return sump_acquire_samples();
 
 	case SUMP_DESC:
 		/* Send device description. */
@@ -542,80 +584,10 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 	return false;
 }
 
-/**
- * Acquires data from the probes and sends it out to the controlling software.
- *
- * This function will acquire up to BP_SUMP_SAMPLE_MEMORY_SIZE, by using the
- * value read from the samples_to_acquire variable.  Calling this function
- * where the sampler is not armed will not trigger any action.
- *
- * To avoid rewriting interrupt vectors with the bootloader, this firmware
- * currently uses polling to read the trigger and timer.  A final version
- * should use interrupts after lots of testing.
- *
- * @return true if data acquisition was performed, false otherwise.
- */
-static bool sump_acquire_samples(void)
-{
-	size_t i;
-
-	switch (sampler_state) {
-	case SAMPLER_ARMED:
-		/* Can start sampling. */
-
-		/* Skip if no interrupt and no trigger set. */
-		if (!IFS1bits.CNIF && CNEN2) {
-			break;
-		}
-
-		/* Take samples. */
-
-		/* Start timer #4. */
-		T4CONbits.TON = ON;
-
-		/* Clear timer #4 interrupt flag. */
-		IFS1bits.T5IF = OFF;
-
-		/* Capture samples into the terminal buffer. */
-		for (i = 0; i < samples_to_acquire; i++) {
-			bus_pirate_configuration.terminal_input[i] = PORTB >> 6;
-
-			/* Wait for timer4 interrupt to trigger. */
-			while (IFS1bits.T5IF == OFF) {
-			}
-
-			/* Clear timer #4 interrupt flag. */
-			IFS1bits.T5IF = OFF;
-		}
-
-		/* Disable change notification for pins 16 to 31. */
-		CNEN2 = 0;
-
-		/* Stop timer #4. */
-		T4CON = OFF;
-
-		/* Write captured samples out. */
-		for (i = samples_to_acquire; i > 0; i--) {
-			user_serial_transmit_character (bus_pirate_configuration.terminal_input[i - 1]);
-		}
-
-		/* Reset the analyzer state. */
-		sump_reset();
-
-		/* Acquisition complete. */
-		return true;
-
-	case SAMPLER_IDLE:
-	default:
-		/* Nothing to do. */
-		break;
-	}
-	/* Acquisition was not performed. */
-	return false;
-}
-
 void enter_sump_mode(void)
 {
+	uint8_t cmd;
+
 	/* Set probing channels to INPUT mode. */
 	IODIR |= AUX + MOSI + CLK + MISO + CS;
 
@@ -623,29 +595,14 @@ void enter_sump_mode(void)
 	sump_reset();
 
 	/* Trigger the device ID broadcast response. */
-	sump_handle_command_byte(SUMP_ID);
+	cmd = SUMP_ID;
 
 	/* Sampling action. */
 	for (;;) {
-		/* Wait for a command byte to be available on the bus. */
-		if (user_serial_ready_to_read()) {
-			/* Process the command byte. */
-			if (sump_handle_command_byte(user_serial_read_byte())) {
-				/* A SUMP_RESET command was received, abort. */
-				return;
-			}
-		}
-
-		/*
-		 * Start the acquisition process (if the device is not properly
-		 * set up nothing will happen, so it's safe to call this
-		 * anyway).
-		 */
-		if (sump_acquire_samples()) {
-
-			/* The acquisition process finished, end. */
+		if (sump_handle_command_byte(cmd))
 			return;
-		}
+		/* read next command */
+		cmd = user_serial_read_byte();
 	}
 }
 
