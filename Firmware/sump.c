@@ -400,69 +400,9 @@ static sump_analyzer_command_state_t command_processor_state =
 static unsigned int samples_to_acquire;
 
 /**
- * Acquires data from the probes and sends it out to the controlling software.
- *
- * This function will acquire up to BP_SUMP_SAMPLE_MEMORY_SIZE, by using the
- * value read from the samples_to_acquire variable.  Calling this function
- * where the sampler is not armed will not trigger any action.
- *
- * To avoid rewriting interrupt vectors with the bootloader, this firmware
- * currently uses polling to read the trigger and timer.  A final version
- * should use interrupts after lots of testing.
- *
- * @return true if data acquisition was performed, false otherwise.
- */
-static bool sump_acquire_samples(void);
-
-/**
  * Resets the device to start another buffer acquisition.
  */
-static void sump_reset(void);
-
-/**
- * Processes the given byte as a part of a SUMP command.
- *
- * @param[in] input_byte the byte to process.
- * @return true if a SUMP_RESET command was received, false otherwise.
- */
-static bool sump_handle_command_byte(uint8_t input_byte);
-
-void enter_sump_mode(void)
-{
-	/* Set probing channels to INPUT mode. */
-	IODIR |= AUX + MOSI + CLK + MISO + CS;
-
-	/* Reset the analyzer state. */
-	sump_reset();
-
-	/* Trigger the device ID broadcast response. */
-	sump_handle_command_byte(SUMP_ID);
-
-	/* Sampling action. */
-	for (;;) {
-		/* Wait for a command byte to be available on the bus. */
-		if (user_serial_ready_to_read()) {
-			/* Process the command byte. */
-			if (sump_handle_command_byte(user_serial_read_byte())) {
-				/* A SUMP_RESET command was received, abort. */
-				return;
-			}
-		}
-
-		/*
-		 * Start the acquisition process (if the device is not properly
-		 * set up nothing will happen, so it's safe to call this
-		 * anyway).
-		 */
-		if (sump_acquire_samples()) {
-
-			/* The acquisition process finished, end. */
-			return;
-		}
-	}
-}
-
-void sump_reset(void)
+static void sump_reset(void)
 {
 	/* Switch LED off. */
 	BP_LEDMODE = OFF;
@@ -492,7 +432,13 @@ void sump_reset(void)
 	sampler_state = SAMPLER_IDLE;
 }
 
-bool sump_handle_command_byte(unsigned char input_byte)
+/**
+ * Processes the given byte as a part of a SUMP command.
+ *
+ * @param[in] input_byte the byte to process.
+ * @return true if a SUMP_RESET command was received, false otherwise.
+ */
+static bool sump_handle_command_byte(unsigned char input_byte)
 {
 	uint32_t period;
 	/*
@@ -667,7 +613,20 @@ bool sump_handle_command_byte(unsigned char input_byte)
 	return false;
 }
 
-bool sump_acquire_samples(void)
+/**
+ * Acquires data from the probes and sends it out to the controlling software.
+ *
+ * This function will acquire up to BP_SUMP_SAMPLE_MEMORY_SIZE, by using the
+ * value read from the samples_to_acquire variable.  Calling this function
+ * where the sampler is not armed will not trigger any action.
+ *
+ * To avoid rewriting interrupt vectors with the bootloader, this firmware
+ * currently uses polling to read the trigger and timer.  A final version
+ * should use interrupts after lots of testing.
+ *
+ * @return true if data acquisition was performed, false otherwise.
+ */
+static bool sump_acquire_samples(void)
 {
 	size_t i;
 
@@ -724,6 +683,41 @@ bool sump_acquire_samples(void)
 	}
 	/* Acquisition was not performed. */
 	return false;
+}
+
+void enter_sump_mode(void)
+{
+	/* Set probing channels to INPUT mode. */
+	IODIR |= AUX + MOSI + CLK + MISO + CS;
+
+	/* Reset the analyzer state. */
+	sump_reset();
+
+	/* Trigger the device ID broadcast response. */
+	sump_handle_command_byte(SUMP_ID);
+
+	/* Sampling action. */
+	for (;;) {
+		/* Wait for a command byte to be available on the bus. */
+		if (user_serial_ready_to_read()) {
+			/* Process the command byte. */
+			if (sump_handle_command_byte(user_serial_read_byte())) {
+				/* A SUMP_RESET command was received, abort. */
+				return;
+			}
+		}
+
+		/*
+		 * Start the acquisition process (if the device is not properly
+		 * set up nothing will happen, so it's safe to call this
+		 * anyway).
+		 */
+		if (sump_acquire_samples()) {
+
+			/* The acquisition process finished, end. */
+			return;
+		}
+	}
 }
 
 #endif				/* BP_ENABLE_SUMP_SUPPORT */
