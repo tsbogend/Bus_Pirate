@@ -205,6 +205,7 @@
  *          ++++++++++++++++++++++++++++++++--- Trigger Mask
  */
 #define SUMP_TRIG_VALS 0xC1
+#define SUMP_TRIG_CONF 0xC2
 
 /**
  * Not used, key means end of metadata.
@@ -506,6 +507,12 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 	case SUMP_TRIG_VALS:
 		sump_read_cmd_param(param);
 		sump_trigger_val = param[0] & BP_SUMP_CHANNEL_MASK;
+		break;
+
+	case SUMP_TRIG_CONF:
+		sump_read_cmd_param(param);
+
+		/* @TODO: Fill this? */
 		break;
 
 	case SUMP_FLAGS:
