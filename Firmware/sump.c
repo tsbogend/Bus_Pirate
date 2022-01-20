@@ -277,16 +277,24 @@
 #define BP_SUMP_MAXIMUM_SAMPLE_RATE 1000000
 
 /**
- * How many probes the Bus Pirate can use.
- */
-#define BP_SUMP_PROBES_COUNT 5
-
-/**
  * SUMP protocol version the Bus Pirate supports.
  */
 #define BP_SUMP_PROTOCOL_VERSION 2
 
-#define BP_SUMP_CHANNEL_MASK	((1 << (BP_SUMP_PROBES_COUNT + 1)) - 1)
+#ifdef BUSPIRATEV4
+#define BP_SUMP_DEVICE_NAME	'B', 'P', 'v', '4', '\0'
+#define BP_SUMP_PROBES_COUNT	6
+#define READ_IOPORT		IOPOR
+#define IOBITS			(AUX + MOSI + CLK + MISO + CS + AUX2)
+#elif defined(BUSPIRATEV3)
+#define BP_SUMP_DEVICE_NAME	'B', 'P', 'v', '3', '\0'
+#define BP_SUMP_PROBES_COUNT	5
+#define READ_IOPORT		(PORTB >> 6)
+#define IOBITS			(AUX + MOSI + CLK + MISO + CS)
+#error "Invalid or unknown Bus Pirate version!"
+#endif				/* BUSPIRATEV4 || BUSPIRATEV3 */
+
+#define BP_SUMP_CHANNEL_MASK	((1 << BP_SUMP_PROBES_COUNT) - 1)
 
 /**
  * SUMP metadata information for the Bus Pirate device.
@@ -295,13 +303,7 @@ static const uint8_t SUMP_METADATA[] = {
 	/* Device name. */
 
 	SUMP_METADATA_DEVICE_NAME,
-#ifdef BUSPIRATEV4
-	'B', 'P', 'v', '4', '\0',
-#elif defined(BUSPIRATEV3)
-	'B', 'P', 'v', '3', '\0',
-#else
-#error "Invalid or unknown Bus Pirate version!"
-#endif				/* BUSPIRATEV4 || BUSPIRATEV3 */
+	BP_SUMP_DEVICE_NAME,
 
 	/* Sample memory (4096 bytes). */
 
@@ -407,7 +409,7 @@ static bool sump_acquire_samples(void)
 	T4CONbits.T32 = ON;
 
 	/* wait for trigger */
-	while (((PORTB >> 6) & sump_trigger_mask) != sump_trigger_val) {
+	while ((READ_IOPORT & sump_trigger_mask) != sump_trigger_val) {
 		/* check for abort CMDs */
 		if (user_serial_ready_to_read()) {
 			switch (user_serial_read_byte())
@@ -426,7 +428,8 @@ static bool sump_acquire_samples(void)
 
 	/* Capture samples into the terminal buffer. */
 	for (i = 0; i < samples_to_acquire; i++) {
-		bus_pirate_configuration.terminal_input[i] = PORTB >> 6;
+		bus_pirate_configuration.terminal_input[i] =
+					READ_IOPORT & BP_SUMP_CHANNEL_MASK;
 
 		/* Wait for timer4 interrupt to trigger. */
 		while (IFS1bits.T5IF == OFF) {
@@ -441,7 +444,7 @@ static bool sump_acquire_samples(void)
 
 	/* Write captured samples out. */
 	for (i = samples_to_acquire; i > 0; i--) {
-		user_serial_transmit_character (bus_pirate_configuration.terminal_input[i - 1]);
+		user_serial_transmit_character(bus_pirate_configuration.terminal_input[i - 1]);
 	}
 
 	/* Reset the analyzer state. */
@@ -558,7 +561,7 @@ void enter_sump_mode(void)
 	uint8_t cmd;
 
 	/* Set probing channels to INPUT mode. */
-	IODIR |= AUX + MOSI + CLK + MISO + CS;
+	IODIR |= IOBITS;
 
 	/* Reset the analyzer state. */
 	sump_reset();
