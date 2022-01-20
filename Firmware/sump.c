@@ -286,6 +286,8 @@
  */
 #define BP_SUMP_PROTOCOL_VERSION 2
 
+#define BP_SUMP_CHANNEL_MASK	((1 << (BP_SUMP_PROBES_COUNT + 1)) - 1)
+
 /**
  * SUMP metadata information for the Bus Pirate device.
  */
@@ -344,6 +346,9 @@ extern bus_pirate_configuration_t bus_pirate_configuration;
  */
 static unsigned int samples_to_acquire;
 
+static uint8_t sump_trigger_mask;
+static uint8_t sump_trigger_val;
+
 /**
  * Resets the device to start another buffer acquisition.
  */
@@ -356,15 +361,8 @@ static void sump_reset(void)
 	CNPU1 = 0;
 	CNPU2 = 0;
 
-	/* Disable change notification for all pins. */
-	CNEN1 = 0;
-	CNEN2 = 0;
-
 	/* Stop timer #4. */
 	T4CON = 0;
-
-	/* Disable change notification interrupts (set priority to 0). */
-	IPC4bits.CNIP = 0;
 
 	/* Setup timer periods. */
 	PR5 = HI16(BP_DEFAULT_TIMER_PERIOD);
@@ -372,6 +370,8 @@ static void sump_reset(void)
 
 	/* Default to acquire a full buffer. */
 	samples_to_acquire = BP_SUMP_SAMPLE_MEMORY_SIZE;
+	sump_trigger_mask = 0;
+	sump_trigger_val = 0;
 }
 
 /**
@@ -406,17 +406,8 @@ static bool sump_acquire_samples(void)
 	/* Timer #4 counter will be 32 bits wide. */
 	T4CONbits.T32 = ON;
 
-	/* Clear change notification interrupt flag. */
-	IFS1bits.CNIF = OFF;
-
-	/* Disable change notification interrupts. */
-	IEC1bits.CNIE = OFF;
-
-	/* Set change notification interrupt priority to 1. */
-	IPC4bits.CNIP = 1;
-
 	/* wait for trigger */
-	while (!IFS1bits.CNIF && CNEN2) {
+	while (((PORTB >> 6) & sump_trigger_mask) != sump_trigger_val) {
 		/* check for abort CMDs */
 		if (user_serial_ready_to_read()) {
 			switch (user_serial_read_byte())
@@ -444,9 +435,6 @@ static bool sump_acquire_samples(void)
 		/* Clear timer #4 interrupt flag. */
 		IFS1bits.T5IF = OFF;
 	}
-
-	/* Disable change notification for pins 16 to 31. */
-	CNEN2 = 0;
 
 	/* Stop timer #4. */
 	T4CON = OFF;
@@ -509,31 +497,12 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 
 	case SUMP_TRIG:
 		sump_read_cmd_param(param);
+		sump_trigger_mask = param[0] & BP_SUMP_CHANNEL_MASK;
+		break;
 
-		/* Set a trigger on the AUX pin. */
-		if (param[0] & 0b00010000) {
-			CNEN2 |= 0b0000000000000001;
-		}
-
-		/* Set a trigger on the ??? pin. */
-		if (param[0] & 0b00001000) {
-			CNEN2 |= 0b0000000000100000;
-		}
-
-		/* Set a trigger on the ??? pin. */
-		if (param[0] & 0b00000100) {
-			CNEN2 |= 0b0000000001000000;
-		}
-
-		/* Set a trigger on the ??? pin. */
-		if (param[0] & 0b00000010) {
-			CNEN2 |= 0b0000000010000000;
-		}
-
-		/* Set a trigger on the ??? pin. */
-		if (param[0] & 0b00000001) {
-			CNEN2 |= 0b0000000100000000;
-		}
+	case SUMP_TRIG_VALS:
+		sump_read_cmd_param(param);
+		sump_trigger_val = param[0] & BP_SUMP_CHANNEL_MASK;
 		break;
 
 	case SUMP_FLAGS:
