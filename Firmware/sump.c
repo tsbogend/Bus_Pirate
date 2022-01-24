@@ -474,7 +474,10 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 	uint8_t param[4];
 	uint32_t period;
 
-	/* No command bytes received yet, this is the first one. */
+	/* check for long command */
+	if (input_byte & 0x80)
+		sump_read_cmd_param(param);
+
 	switch (input_byte) {
 	case SUMP_RESET:
 		/* Reset the analyzer. */
@@ -500,30 +503,22 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 		break;
 
 	case SUMP_TRIG:
-		sump_read_cmd_param(param);
 		sump_trigger_mask = param[0] & BP_SUMP_CHANNEL_MASK;
 		break;
 
 	case SUMP_TRIG_VALS:
-		sump_read_cmd_param(param);
 		sump_trigger_val = param[0] & BP_SUMP_CHANNEL_MASK;
 		break;
 
 	case SUMP_TRIG_CONF:
-		sump_read_cmd_param(param);
-
 		/* @TODO: Fill this? */
 		break;
 
 	case SUMP_FLAGS:
-		sump_read_cmd_param(param);
-
 		/* @TODO: Fill this? */
 		break;
 
 	case SUMP_CNT:
-		sump_read_cmd_param(param);
-
 		/* Read requested samples buffer size. */
 		samples_to_acquire = (((param[1] << 8) + param[0]) + 1) * 4;
 
@@ -534,8 +529,6 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 		break;
 
 	case SUMP_DIV:
-		sump_read_cmd_param(param);
-
 		/*
 		 * Read the 24-bits period value and rescale from SUMP's
 		 * own 100MHz frequency range to the internal 16MIPs
