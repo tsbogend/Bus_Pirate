@@ -272,6 +272,9 @@
  */
 #define BP_SUMP_SAMPLE_MEMORY_SIZE BP_TERMINAL_BUFFER_SIZE
 
+/* Maximum sample count with RLE enabled */
+#define BP_SUMP_MAX_SAMPLES	((uint32_t)BP_SUMP_SAMPLE_MEMORY_SIZE / 2 * 128)
+
 /**
  * The highest sample rate for the Bus Pirate to sample data at, in Hz.
  */
@@ -309,10 +312,10 @@ static const uint8_t SUMP_METADATA[] = {
 	/* Sample memory (4096 bytes). */
 
 	SUMP_METADATA_SAMPLE_MEMORY_AVAILABLE,
-	(uint8_t) ((uint32_t) BP_SUMP_SAMPLE_MEMORY_SIZE >> 24),
-	(uint8_t) (((uint32_t) BP_SUMP_SAMPLE_MEMORY_SIZE >> 16) & 0xFF),
-	(uint8_t) (((uint32_t) BP_SUMP_SAMPLE_MEMORY_SIZE >> 8) & 0xFF),
-	(uint8_t) ((uint32_t) BP_SUMP_SAMPLE_MEMORY_SIZE & 0xFF),
+	(uint8_t) ((uint32_t) BP_SUMP_MAX_SAMPLES >> 24),
+	(uint8_t) (((uint32_t) BP_SUMP_MAX_SAMPLES >> 16) & 0xFF),
+	(uint8_t) (((uint32_t) BP_SUMP_MAX_SAMPLES >> 8) & 0xFF),
+	(uint8_t) ((uint32_t) BP_SUMP_MAX_SAMPLES & 0xFF),
 
 	/* Sample rate (1MHz). */
 
@@ -347,10 +350,11 @@ extern bus_pirate_configuration_t bus_pirate_configuration;
 /**
  * How many bytes should be acquired in the next sampling operation, in bytes.
  */
-static unsigned int samples_to_acquire;
+static uint32_t samples_to_acquire;
 
 static uint8_t sump_trigger_mask;
 static uint8_t sump_trigger_val;
+static bool sump_rle_mode;
 
 /**
  * Resets the device to start another buffer acquisition.
@@ -372,15 +376,16 @@ static void sump_reset(void)
 	PR4 = LO16(BP_DEFAULT_TIMER_PERIOD);
 
 	/* Default to acquire a full buffer. */
-	samples_to_acquire = BP_SUMP_SAMPLE_MEMORY_SIZE;
+	samples_to_acquire = BP_SUMP_MAX_SAMPLES;
 	sump_trigger_mask = 0;
 	sump_trigger_val = 0;
+	sump_rle_mode = false;
 }
 
 /**
  * Acquires data from the probes and sends it out to the controlling software.
  *
- * This function will acquire up to BP_SUMP_SAMPLE_MEMORY_SIZE, by using the
+ * This function will acquire up to BP_SUMP_MAX_SAMPLES, by using the
  * value read from the samples_to_acquire variable.  Calling this function
  * where the sampler is not armed will not trigger any action.
  *
@@ -392,13 +397,14 @@ static void sump_reset(void)
  */
 static bool sump_acquire_samples(void)
 {
-	size_t i;
+	uint8_t last_sample, sample, count;
+	uint8_t *bufptr, *endptr;
+	uint32_t i;
+
+	bufptr = bus_pirate_configuration.terminal_input;
 
 	/* Turn the LED on. */
 	BP_LEDMODE = ON;
-
-	/* Stop timer #4. */
-	T4CON = 0;
 
 	/* Clear timer #5 holding register. */
 	TMR5HLD = 0;
@@ -407,7 +413,7 @@ static bool sump_acquire_samples(void)
 	TMR4 = 0;
 
 	/* Timer #4 counter will be 32 bits wide. */
-	T4CONbits.T32 = ON;
+	T4CON = 0b1000;
 
 	/* wait for trigger */
 	while ((READ_IOPORT & sump_trigger_mask) != sump_trigger_val) {
@@ -428,25 +434,57 @@ static bool sump_acquire_samples(void)
 	IFS1bits.T5IF = OFF;
 
 	/* Capture samples into the terminal buffer. */
-	for (i = 0; i < samples_to_acquire; i++) {
-		bus_pirate_configuration.terminal_input[i] =
-					READ_IOPORT & BP_SUMP_CHANNEL_MASK;
+	if (sump_rle_mode) {
+		endptr = bufptr + BP_SUMP_SAMPLE_MEMORY_SIZE - 1;
+		last_sample = 0xff; /* impossible value */
+		count = 0;
+		i = 0;
 
-		/* Wait for timer4 interrupt to trigger. */
-		while (IFS1bits.T5IF == OFF) {
+		for (i = 0; i < samples_to_acquire && bufptr < endptr; i++) {
+			sample = READ_IOPORT & BP_SUMP_CHANNEL_MASK;
+
+			if (sample != last_sample) {
+				if (count)
+					*bufptr++ = count | 0x80;
+
+				*bufptr++ = sample;
+				last_sample = sample;
+				count = 0;
+			} else {
+				if (++count == 127) {
+					*bufptr++ = count | 0x80;
+					count = 0;
+					last_sample = 0xff;
+				}
+			}
+			/* Wait for timer4 interrupt to trigger. */
+			while (IFS1bits.T5IF == OFF) {
+			}
+
+			/* Clear timer #4 interrupt flag. */
+			IFS1bits.T5IF = OFF;
 		}
+		if (count)
+			*bufptr++ = count | 0x80;
+	} else {
+		for (i = 0; i < samples_to_acquire; i++) {
+			*bufptr++ = READ_IOPORT & BP_SUMP_CHANNEL_MASK;
 
-		/* Clear timer #4 interrupt flag. */
-		IFS1bits.T5IF = OFF;
+			/* Wait for timer4 interrupt to trigger. */
+			while (IFS1bits.T5IF == OFF) {
+			}
+
+			/* Clear timer #4 interrupt flag. */
+			IFS1bits.T5IF = OFF;
+		}
 	}
 
 	/* Stop timer #4. */
 	T4CON = OFF;
 
 	/* Write captured samples out. */
-	for (i = samples_to_acquire; i > 0; i--) {
-		user_serial_transmit_character(bus_pirate_configuration.terminal_input[i - 1]);
-	}
+	while (bufptr > bus_pirate_configuration.terminal_input)
+		user_serial_transmit_character(*--bufptr);
 
 	/* Reset the analyzer state. */
 	sump_reset();
@@ -515,16 +553,18 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 		break;
 
 	case SUMP_FLAGS:
-		/* @TODO: Fill this? */
+		sump_rle_mode = (param[1] & 1) ? true : false;
 		break;
 
 	case SUMP_CNT:
 		/* Read requested samples buffer size. */
-		samples_to_acquire = (((param[1] << 8) + param[0]) + 1) * 4;
+		samples_to_acquire = param[1] << 8 | param[0];
+		samples_to_acquire++;
+		samples_to_acquire *= 4;
 
 		/* Clamp sample counter if more bytes are requested. */
-		if (samples_to_acquire > BP_SUMP_SAMPLE_MEMORY_SIZE) {
-			samples_to_acquire = BP_SUMP_SAMPLE_MEMORY_SIZE;
+		if (samples_to_acquire > BP_SUMP_MAX_SAMPLES) {
+			samples_to_acquire = BP_SUMP_MAX_SAMPLES;
 		}
 		break;
 
