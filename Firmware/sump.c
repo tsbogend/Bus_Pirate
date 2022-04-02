@@ -520,7 +520,7 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 	case SUMP_RESET:
 		/* Reset the analyzer. */
 		sump_reset();
-		return true;
+		break;
 
 	case SUMP_ID:
 		/* Send the device identification buffer. */
@@ -528,7 +528,8 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 		break;
 
 	case SUMP_RUN:
-		return sump_acquire_samples();
+		sump_acquire_samples();
+		break;
 
 	case SUMP_DESC:
 		/* Send device description. */
@@ -598,23 +599,16 @@ static bool sump_handle_command_byte(unsigned char input_byte)
 
 void enter_sump_mode(void)
 {
-	uint8_t cmd;
-
 	/* Set probing channels to INPUT mode. */
 	IODIR |= IOBITS;
 
 	/* Reset the analyzer state. */
 	sump_reset();
 
-	/* Trigger the device ID broadcast response. */
-	cmd = SUMP_ID;
-
 	/* Sampling action. */
 	for (;;) {
-		if (sump_handle_command_byte(cmd))
+		if (sump_handle_command_byte(user_serial_read_byte()))
 			return;
-		/* read next command */
-		cmd = user_serial_read_byte();
 	}
 }
 
